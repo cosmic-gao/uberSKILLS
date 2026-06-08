@@ -3,6 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@uberskills/db", () => ({
   isModelCacheEmpty: vi.fn(),
   listModels: vi.fn(),
+  getDecryptedApiKey: vi.fn(),
+  getCustomProviders: vi.fn(),
+}));
+
+vi.mock("@/lib/ai-provider", () => ({
+  customModelId: (p: { id: string }, m: { id: string }) => `custom:${p.id}/${m.id}`,
 }));
 
 vi.mock("@/lib/sync-models", () => ({
@@ -18,62 +24,83 @@ vi.mock("@/lib/logger", () => ({
   }),
 }));
 
-const { isModelCacheEmpty, listModels } = await import("@uberskills/db");
+const { isModelCacheEmpty, listModels, getDecryptedApiKey, getCustomProviders } = await import(
+  "@uberskills/db"
+);
 const { fetchAndSyncModels, isSyncError } = await import("@/lib/sync-models");
 const mockedIsModelCacheEmpty = vi.mocked(isModelCacheEmpty);
 const mockedListModels = vi.mocked(listModels);
+const mockedGetDecryptedApiKey = vi.mocked(getDecryptedApiKey);
+const mockedGetCustomProviders = vi.mocked(getCustomProviders);
 const mockedFetchAndSyncModels = vi.mocked(fetchAndSyncModels);
 const mockedIsSyncError = vi.mocked(isSyncError);
 
 const { GET } = await import("../route");
 
+/** A cached OpenRouter model row. */
+function orModel(id: string, name: string, provider: string) {
+  return {
+    id,
+    slug: `${provider}-slug`,
+    name,
+    provider,
+    contextLength: 8192,
+    inputPrice: "0.01",
+    outputPrice: "0.02",
+    modality: "text->text",
+    syncedAt: new Date(),
+  };
+}
+
+const minimaxProvider = {
+  id: "minimax",
+  name: "MiniMax",
+  baseUrl: "https://api.minimaxi.com/v1",
+  apiKey: "mm-key",
+  models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.restoreAllMocks();
+  mockedGetCustomProviders.mockReturnValue([]);
+  mockedGetDecryptedApiKey.mockReturnValue(null);
+  mockedIsModelCacheEmpty.mockReturnValue(false);
+  mockedListModels.mockReturnValue([]);
 });
 
 describe("GET /api/models", () => {
-  it("returns 401 when no API key is configured", async () => {
+  it("returns custom-only models when no OpenRouter key is configured", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue(null);
     mockedIsModelCacheEmpty.mockReturnValue(true);
-    const err = Object.assign(new Error("No API key configured"), {
-      code: "NO_API_KEY",
-      httpStatus: 401,
-    });
-    mockedFetchAndSyncModels.mockRejectedValueOnce(err);
-    mockedIsSyncError.mockReturnValue(true);
+    mockedGetCustomProviders.mockReturnValue([minimaxProvider]);
 
     const response = await GET();
     const data = await response.json();
 
-    expect(response.status).toBe(401);
-    expect(data.code).toBe("NO_API_KEY");
+    expect(response.status).toBe(200);
+    // No OpenRouter key → never attempt a sync.
+    expect(mockedFetchAndSyncModels).not.toHaveBeenCalled();
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0]).toMatchObject({
+      id: "custom:minimax/MiniMax-Text-01",
+      name: "MiniMax One",
+      provider: "MiniMax",
+    });
   });
 
-  it("returns sorted model list with provider field on success", async () => {
-    mockedIsModelCacheEmpty.mockReturnValue(false);
+  it("returns an empty list when nothing is configured", async () => {
+    const response = await GET();
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.models).toEqual([]);
+  });
+
+  it("returns sorted OpenRouter models", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-key");
     mockedListModels.mockReturnValue([
-      {
-        id: "openai/gpt-4",
-        slug: "openai-gpt-4",
-        name: "GPT-4",
-        provider: "openai",
-        contextLength: 8192,
-        inputPrice: "0.03",
-        outputPrice: "0.06",
-        modality: "text->text",
-        syncedAt: new Date(),
-      },
-      {
-        id: "anthropic/claude-sonnet-4",
-        slug: "anthropic-claude-sonnet-4",
-        name: "Claude Sonnet 4",
-        provider: "anthropic",
-        contextLength: 200000,
-        inputPrice: "0.003",
-        outputPrice: "0.015",
-        modality: "text->text",
-        syncedAt: new Date(),
-      },
+      orModel("openai/gpt-4", "GPT-4", "openai"),
+      orModel("anthropic/claude-sonnet-4", "Claude Sonnet 4", "anthropic"),
     ]);
 
     const response = await GET();
@@ -81,48 +108,43 @@ describe("GET /api/models", () => {
 
     expect(response.status).toBe(200);
     expect(data.models).toHaveLength(2);
-    // Sorted by provider: anthropic before openai
-    expect(data.models[0].id).toBe("anthropic/claude-sonnet-4");
     expect(data.models[0].provider).toBe("anthropic");
-    expect(data.models[1].id).toBe("openai/gpt-4");
     expect(data.models[1].provider).toBe("openai");
   });
 
-  it("auto-syncs on first access when cache is empty", async () => {
+  it("auto-syncs on first access when the cache is empty and a key exists", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-key");
     mockedIsModelCacheEmpty.mockReturnValue(true);
     mockedFetchAndSyncModels.mockResolvedValueOnce(1);
-    mockedListModels.mockReturnValue([
-      {
-        id: "openai/gpt-4",
-        slug: "openai-gpt-4",
-        name: "GPT-4",
-        provider: "openai",
-        contextLength: 8192,
-        inputPrice: "0.03",
-        outputPrice: "0.06",
-        modality: "text->text",
-        syncedAt: new Date(),
-      },
-    ]);
+    mockedListModels.mockReturnValue([orModel("openai/gpt-4", "GPT-4", "openai")]);
 
     const response = await GET();
     const data = await response.json();
 
     expect(mockedFetchAndSyncModels).toHaveBeenCalledOnce();
     expect(data.models).toHaveLength(1);
-    expect(data.models[0].id).toBe("openai/gpt-4");
   });
 
-  it("skips sync when cache is populated", async () => {
-    mockedIsModelCacheEmpty.mockReturnValue(false);
-    mockedListModels.mockReturnValue([]);
+  it("does not sync when no key is configured even if the cache is empty", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+    mockedIsModelCacheEmpty.mockReturnValue(true);
 
     await GET();
 
     expect(mockedFetchAndSyncModels).not.toHaveBeenCalled();
   });
 
-  it("returns 401 when OpenRouter returns 401", async () => {
+  it("skips sync when the cache is populated", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-key");
+    mockedIsModelCacheEmpty.mockReturnValue(false);
+
+    await GET();
+
+    expect(mockedFetchAndSyncModels).not.toHaveBeenCalled();
+  });
+
+  it("swallows a sync failure and still returns custom models", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-bad");
     mockedIsModelCacheEmpty.mockReturnValue(true);
     const err = Object.assign(new Error("Invalid API key"), {
       code: "INVALID_KEY",
@@ -130,43 +152,29 @@ describe("GET /api/models", () => {
     });
     mockedFetchAndSyncModels.mockRejectedValueOnce(err);
     mockedIsSyncError.mockReturnValue(true);
+    mockedGetCustomProviders.mockReturnValue([minimaxProvider]);
 
     const response = await GET();
     const data = await response.json();
 
-    expect(response.status).toBe(401);
-    expect(data.code).toBe("INVALID_KEY");
+    // Sync error is logged, not propagated — custom models still returned.
+    expect(response.status).toBe(200);
+    expect(data.models).toHaveLength(1);
+    expect(data.models[0].id).toBe("custom:minimax/MiniMax-Text-01");
   });
 
-  it("returns 429 when rate limited", async () => {
-    mockedIsModelCacheEmpty.mockReturnValue(true);
-    const err = Object.assign(new Error("Rate limited"), {
-      code: "RATE_LIMITED",
-      httpStatus: 429,
-    });
-    mockedFetchAndSyncModels.mockRejectedValueOnce(err);
-    mockedIsSyncError.mockReturnValue(true);
+  it("merges OpenRouter and custom provider models", async () => {
+    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-key");
+    mockedListModels.mockReturnValue([orModel("openai/gpt-4", "GPT-4", "openai")]);
+    mockedGetCustomProviders.mockReturnValue([minimaxProvider]);
 
     const response = await GET();
     const data = await response.json();
 
-    expect(response.status).toBe(429);
-    expect(data.code).toBe("RATE_LIMITED");
-  });
-
-  it("returns 502 on network error", async () => {
-    mockedIsModelCacheEmpty.mockReturnValue(true);
-    const err = Object.assign(new Error("Upstream error"), {
-      code: "UPSTREAM_ERROR",
-      httpStatus: 502,
-    });
-    mockedFetchAndSyncModels.mockRejectedValueOnce(err);
-    mockedIsSyncError.mockReturnValue(true);
-
-    const response = await GET();
-    const data = await response.json();
-
-    expect(response.status).toBe(502);
-    expect(data.code).toBe("UPSTREAM_ERROR");
+    expect(response.status).toBe(200);
+    expect(data.models).toHaveLength(2);
+    const ids = data.models.map((m: { id: string }) => m.id);
+    expect(ids).toContain("openai/gpt-4");
+    expect(ids).toContain("custom:minimax/MiniMax-Text-01");
   });
 });

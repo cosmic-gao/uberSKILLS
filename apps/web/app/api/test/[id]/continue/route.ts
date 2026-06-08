@@ -1,9 +1,9 @@
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { getDecryptedApiKey, getTestRun, updateTestRun } from "@uberskills/db";
+import { getTestRun, updateTestRun } from "@uberskills/db";
 import type { TestMessage } from "@uberskills/types";
 import { streamText } from "ai";
 import { NextResponse } from "next/server";
 
+import { isNoProviderError, resolveLanguageModel } from "@/lib/ai-provider";
 import { routeLogger } from "@/lib/logger";
 
 const log = routeLogger("POST", "/api/test/[id]/continue");
@@ -27,24 +27,6 @@ type RouteContext = { params: Promise<{ id: string }> };
 export async function POST(request: Request, context: RouteContext): Promise<Response> {
   const { id } = await context.params;
   const rlog = log.child({ testRunId: id });
-
-  // Decrypt the stored API key
-  let apiKey: string | null;
-  try {
-    apiKey = getDecryptedApiKey();
-  } catch {
-    return NextResponse.json(
-      { error: "Failed to decrypt API key.", code: "DECRYPT_ERROR" },
-      { status: 500 },
-    );
-  }
-
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "No API key configured.", code: "NO_API_KEY" },
-      { status: 401 },
-    );
-  }
 
   // Fetch existing test run
   const testRun = getTestRun(id);
@@ -115,6 +97,21 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     content: m.content,
   }));
 
+  // Resolve the model to a configured provider before mutating run state.
+  let resolved: ReturnType<typeof resolveLanguageModel>;
+  try {
+    resolved = resolveLanguageModel(testRun.model, { enableWebSearch });
+  } catch (err) {
+    if (isNoProviderError(err)) {
+      return NextResponse.json({ error: err.message, code: "NO_PROVIDER" }, { status: 401 });
+    }
+    rlog.error({ err }, "failed to resolve provider");
+    return NextResponse.json(
+      { error: "Failed to decrypt API key.", code: "DECRYPT_ERROR" },
+      { status: 500 },
+    );
+  }
+
   // Mark as running
   updateTestRun(id, { status: "running" });
 
@@ -122,20 +119,9 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
 
   let ttftMs: number | null = null;
 
-  const openrouter = createOpenRouter({
-    apiKey,
-    headers: {
-      "HTTP-Referer": "https://uberskills.dev",
-      "X-Title": "uberSKILLS",
-    },
-  });
-
   try {
     const result = streamText({
-      model: openrouter(
-        testRun.model,
-        enableWebSearch ? { web_search_options: { max_results: 5 } } : undefined,
-      ),
+      model: resolved.model,
       system: testRun.systemPrompt,
       messages: aiMessages,
       onChunk() {

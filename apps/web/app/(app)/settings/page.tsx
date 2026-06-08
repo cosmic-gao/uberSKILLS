@@ -51,18 +51,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/page-header";
+import {
+  CustomProvidersCard,
+  type ProviderDraft,
+} from "@/components/settings/custom-providers-card";
 import type { Model } from "@/hooks/use-models";
 import { invalidateModelCache, useModels } from "@/hooks/use-models";
 
 type ConnectionStatus = "idle" | "testing" | "connected" | "error";
 
 /**
- * Settings page -- API key management (S3-2), preferences and data management (S3-3).
+ * Settings page -- model provider configuration, preferences, and data management.
  *
- * Three sections:
- * 1. API Configuration -- OpenRouter API key input, masking, test
- * 2. Preferences -- Default model dropdown, theme selector
- * 3. Data Management -- Export all skills, backup DB, restore backup
+ * Four sections:
+ * 1. OpenRouter -- optional API key + base URL override, connection test
+ * 2. Custom Providers -- add/edit/delete OpenAI-compatible providers (MiniMax, etc.)
+ * 3. Preferences -- default model dropdown, theme selector
+ * 4. Data Management -- export all skills, backup DB, restore backup
  */
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -76,6 +81,10 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [keyEdited, setKeyEdited] = useState(false);
   const savingRef = useRef(false);
+
+  // OpenRouter base URL form state
+  const [baseUrl, setBaseUrl] = useState("");
+  const [baseUrlEdited, setBaseUrlEdited] = useState(false);
 
   // Model list via shared hook
   const { models, isLoading: modelsLoading, refetch: refetchModels } = useModels();
@@ -101,6 +110,7 @@ export default function SettingsPage() {
         const data = (await res.json()) as AppSettings;
         setSettings(data);
         setApiKey(data.openrouterApiKey ?? "");
+        setBaseUrl(data.openrouterBaseUrl ?? "");
       } catch {
         toast.error("Failed to load settings");
       } finally {
@@ -145,6 +155,59 @@ export default function SettingsPage() {
       savingRef.current = false;
     }
   }, [apiKey, keyEdited]);
+
+  /** Saves the OpenRouter base URL via PUT /api/settings. */
+  const saveBaseUrl = useCallback(async () => {
+    if (!baseUrlEdited) return;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ openrouterBaseUrl: baseUrl.trim() }),
+      });
+      if (!res.ok) {
+        const err = (await res.json()) as { error: string };
+        throw new Error(err.error ?? "Failed to save base URL");
+      }
+      const updated = (await res.json()) as AppSettings;
+      setSettings(updated);
+      setBaseUrl(updated.openrouterBaseUrl ?? "");
+      setBaseUrlEdited(false);
+      // Models may differ on a different endpoint.
+      invalidateModelCache();
+      toast.success("OpenRouter base URL saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save base URL");
+    }
+  }, [baseUrl, baseUrlEdited]);
+
+  /** Persists the full custom-provider list via PUT /api/settings. */
+  const handleSaveProviders = useCallback(
+    async (providers: ProviderDraft[]): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ customProviders: providers }),
+        });
+        if (!res.ok) {
+          const err = (await res.json()) as { error: string };
+          throw new Error(err.error ?? "Failed to save providers");
+        }
+        const updated = (await res.json()) as AppSettings;
+        setSettings(updated);
+        // Custom models changed — refresh the shared model list.
+        invalidateModelCache();
+        refetchModels();
+        toast.success("Providers saved");
+        return true;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to save providers");
+        return false;
+      }
+    },
+    [refetchModels],
+  );
 
   /** Tests the OpenRouter API key. */
   const testConnection = useCallback(async () => {
@@ -338,6 +401,23 @@ export default function SettingsPage() {
     }
   };
 
+  // Event handlers for the OpenRouter base URL input
+  const handleBaseUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setBaseUrl(e.target.value);
+    setBaseUrlEdited(true);
+  };
+
+  const handleBaseUrlBlur = () => {
+    if (baseUrlEdited) saveBaseUrl();
+  };
+
+  const handleBaseUrlKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (baseUrlEdited) saveBaseUrl();
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-8">
@@ -397,20 +477,22 @@ export default function SettingsPage() {
   }
 
   const hasKey = settings?.openrouterApiKey !== null;
+  const hasAnyProvider = hasKey || (settings?.customProviders.length ?? 0) > 0;
 
   return (
     <div className="space-y-8">
-      <PageHeader title="Settings" description="Manage your API configuration and preferences." />
+      <PageHeader title="Settings" description="Manage your model providers and preferences." />
 
-      {/* Section 1: API Configuration */}
+      {/* Section 1: OpenRouter */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Key className="size-5" />
-            API Configuration
+            OpenRouter
           </CardTitle>
           <CardDescription>
-            Connect your OpenRouter API key to enable AI-powered skill creation and testing.
+            Optional. Add an OpenRouter API key to use its model catalog, or skip it and configure a
+            custom provider below.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -485,10 +567,36 @@ export default function SettingsPage() {
               <ConnectionStatusIndicator status={connectionStatus} error={connectionError} />
             </div>
           </div>
+
+          <div className="space-y-2">
+            <label htmlFor="openrouter-base-url" className="text-sm font-medium">
+              Base URL <span className="font-normal text-muted-foreground">(optional)</span>
+            </label>
+            <Input
+              id="openrouter-base-url"
+              value={baseUrl}
+              onChange={handleBaseUrlChange}
+              onBlur={handleBaseUrlBlur}
+              onKeyDown={handleBaseUrlKeyDown}
+              placeholder="https://openrouter.ai/api/v1"
+              className="font-mono"
+              autoComplete="off"
+            />
+            <p className="text-sm text-muted-foreground">
+              Point at an OpenRouter-compatible gateway to extend the available models. Leave blank
+              for the default endpoint.
+            </p>
+          </div>
         </CardContent>
       </Card>
 
-      {/* Section 2: Preferences */}
+      {/* Section 2: Custom Providers */}
+      <CustomProvidersCard
+        providers={settings?.customProviders ?? []}
+        onSave={handleSaveProviders}
+      />
+
+      {/* Section 3: Preferences */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -524,7 +632,7 @@ export default function SettingsPage() {
               loading={modelsLoading}
               value={settings?.defaultModel ?? ""}
               onSelect={(value) => saveSetting("defaultModel", value)}
-              disabled={!hasKey}
+              disabled={!hasAnyProvider}
             />
             <p className="text-sm text-muted-foreground">
               The model used by default when testing skills.
@@ -566,7 +674,7 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      {/* Section 3: Data Management */}
+      {/* Section 4: Data Management */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -742,7 +850,7 @@ function ModelCombobox({ models, loading, value, onSelect, disabled }: ModelComb
             {selectedModel
               ? selectedModel.name
               : disabled
-                ? "Add an API key first"
+                ? "Add a provider first"
                 : "Select a model..."}
           </span>
           <ChevronsUpDown className="ml-2 size-4 shrink-0 opacity-50" />

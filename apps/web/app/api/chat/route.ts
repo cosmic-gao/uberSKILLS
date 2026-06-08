@@ -1,9 +1,8 @@
 import type { UIMessage } from "@ai-sdk/react";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { getDecryptedApiKey } from "@uberskills/db";
 import { convertToModelMessages, streamText } from "ai";
 import { NextResponse } from "next/server";
 
+import { isNoProviderError, resolveLanguageModel } from "@/lib/ai-provider";
 import { routeLogger } from "@/lib/logger";
 import { SKILL_CREATION_SYSTEM_PROMPT } from "@/lib/system-prompts";
 
@@ -23,23 +22,6 @@ interface ChatRequestBody {
  * The system prompt instructs the AI to generate valid SKILL.md content.
  */
 export async function POST(request: Request): Promise<Response> {
-  let apiKey: string | null;
-  try {
-    apiKey = getDecryptedApiKey();
-  } catch {
-    return NextResponse.json(
-      { error: "Failed to decrypt API key. Check your encryption secret.", code: "DECRYPT_ERROR" },
-      { status: 500 },
-    );
-  }
-
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "No API key configured. Add one in Settings first.", code: "NO_API_KEY" },
-      { status: 401 },
-    );
-  }
-
   let body: ChatRequestBody;
   try {
     body = (await request.json()) as ChatRequestBody;
@@ -63,22 +45,29 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  log.info({ model, messageCount: messages.length }, "chat stream started");
+  // Resolve the model to a configured provider (OpenRouter or a custom one).
+  let resolved: ReturnType<typeof resolveLanguageModel>;
+  try {
+    resolved = resolveLanguageModel(model);
+  } catch (err) {
+    if (isNoProviderError(err)) {
+      return NextResponse.json({ error: err.message, code: "NO_PROVIDER" }, { status: 401 });
+    }
+    log.error({ err }, "failed to resolve provider");
+    return NextResponse.json(
+      { error: "Failed to decrypt API key. Check your encryption secret.", code: "DECRYPT_ERROR" },
+      { status: 500 },
+    );
+  }
 
-  const openrouter = createOpenRouter({
-    apiKey,
-    headers: {
-      "HTTP-Referer": "https://uberskills.dev",
-      "X-Title": "uberSKILLS",
-    },
-  });
+  log.info({ model, messageCount: messages.length }, "chat stream started");
 
   // Note: streamText() returns synchronously. Upstream errors (401, 429) may
   // surface during streaming rather than here, but this catch handles
   // synchronous failures like invalid model configuration.
   try {
     const result = streamText({
-      model: openrouter(model),
+      model: resolved.model,
       system: SKILL_CREATION_SYSTEM_PROMPT,
       messages: await convertToModelMessages(messages),
       maxOutputTokens: 32768,

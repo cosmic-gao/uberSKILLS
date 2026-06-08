@@ -5,16 +5,30 @@ vi.mock("@uberskills/db", () => ({
   getAllSettings: vi.fn(),
   getDecryptedApiKey: vi.fn(),
   setSetting: vi.fn(),
+  getCustomProviders: vi.fn(),
+  setCustomProviders: vi.fn(),
+  getOpenrouterBaseUrl: vi.fn(),
 }));
 
-const { getAllSettings, getDecryptedApiKey, setSetting } = await import("@uberskills/db");
+const {
+  getAllSettings,
+  getDecryptedApiKey,
+  setSetting,
+  getCustomProviders,
+  setCustomProviders,
+  getOpenrouterBaseUrl,
+} = await import("@uberskills/db");
 const mockedGetAllSettings = vi.mocked(getAllSettings);
 const mockedGetDecryptedApiKey = vi.mocked(getDecryptedApiKey);
 const mockedSetSetting = vi.mocked(setSetting);
+const mockedGetCustomProviders = vi.mocked(getCustomProviders);
+const mockedSetCustomProviders = vi.mocked(setCustomProviders);
+const mockedGetOpenrouterBaseUrl = vi.mocked(getOpenrouterBaseUrl);
 
 const { GET, PUT } = await import("../route");
 
 const MOCK_DATE = new Date("2026-01-01T00:00:00Z");
+const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
 /** Creates a setting row with a default updatedAt timestamp. */
 function makeSettingRow(key: string, value: string, encrypted = false) {
@@ -32,6 +46,8 @@ function makePutRequest(body: unknown): NextRequest {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedGetCustomProviders.mockReturnValue([]);
+  mockedGetOpenrouterBaseUrl.mockReturnValue(DEFAULT_BASE_URL);
 });
 
 describe("GET /api/settings", () => {
@@ -45,9 +61,51 @@ describe("GET /api/settings", () => {
     expect(response.status).toBe(200);
     expect(data).toEqual({
       openrouterApiKey: null,
+      openrouterBaseUrl: DEFAULT_BASE_URL,
+      customProviders: [],
       defaultModel: "anthropic/claude-sonnet-4",
       theme: "system",
     });
+  });
+
+  it("returns custom providers with API keys masked", async () => {
+    mockedGetAllSettings.mockReturnValue([]);
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+    mockedGetCustomProviders.mockReturnValue([
+      {
+        id: "minimax",
+        name: "MiniMax",
+        baseUrl: "https://api.minimaxi.com/v1",
+        apiKey: "mm-secret",
+        models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+      },
+    ]);
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(data.customProviders).toHaveLength(1);
+    expect(data.customProviders[0]).toEqual({
+      id: "minimax",
+      name: "MiniMax",
+      baseUrl: "https://api.minimaxi.com/v1",
+      apiKeySet: true,
+      models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+    });
+    // The raw key must never be exposed.
+    expect(JSON.stringify(data)).not.toContain("mm-secret");
+  });
+
+  it("reflects a configured OpenRouter base URL", async () => {
+    mockedGetAllSettings.mockReturnValue([]);
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+    mockedGetOpenrouterBaseUrl.mockReturnValue("https://gateway.example.com/v1");
+
+    const response = await GET();
+    const data = await response.json();
+
+    expect(data.openrouterBaseUrl).toBe("https://gateway.example.com/v1");
   });
 
   it("returns stored settings with masked API key", async () => {
@@ -167,6 +225,106 @@ describe("PUT /api/settings", () => {
 
   it("rejects non-string defaultModel", async () => {
     const response = await PUT(makePutRequest({ defaultModel: true }));
+    const data = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(data.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("saves valid custom providers", async () => {
+    mockedGetAllSettings.mockReturnValue([]);
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+
+    const response = await PUT(
+      makePutRequest({
+        customProviders: [
+          {
+            id: "minimax",
+            name: "MiniMax",
+            baseUrl: "https://api.minimaxi.com/v1",
+            apiKey: "mm-key",
+            models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSetCustomProviders).toHaveBeenCalledWith([
+      {
+        id: "minimax",
+        name: "MiniMax",
+        baseUrl: "https://api.minimaxi.com/v1",
+        apiKey: "mm-key",
+        models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+      },
+    ]);
+  });
+
+  it("preserves an existing key when an empty apiKey is submitted", async () => {
+    mockedGetAllSettings.mockReturnValue([]);
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+    // Existing stored provider with a key (used to backfill).
+    mockedGetCustomProviders.mockReturnValue([
+      {
+        id: "minimax",
+        name: "MiniMax",
+        baseUrl: "https://api.minimaxi.com/v1",
+        apiKey: "stored-key",
+        models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+      },
+    ]);
+
+    const response = await PUT(
+      makePutRequest({
+        customProviders: [
+          {
+            id: "minimax",
+            name: "MiniMax",
+            baseUrl: "https://api.minimaxi.com/v1",
+            apiKey: "",
+            models: [{ id: "MiniMax-Text-01", name: "MiniMax One" }],
+          },
+        ],
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSetCustomProviders).toHaveBeenCalledWith([
+      expect.objectContaining({ id: "minimax", apiKey: "stored-key" }),
+    ]);
+  });
+
+  it("rejects custom providers missing a name", async () => {
+    const response = await PUT(
+      makePutRequest({
+        customProviders: [{ baseUrl: "https://x/v1", models: [{ id: "m" }] }],
+      }),
+    );
+    const data = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(data.code).toBe("VALIDATION_ERROR");
+    expect(mockedSetCustomProviders).not.toHaveBeenCalled();
+  });
+
+  it("saves a valid OpenRouter base URL", async () => {
+    mockedGetAllSettings.mockReturnValue([]);
+    mockedGetDecryptedApiKey.mockReturnValue(null);
+
+    const response = await PUT(
+      makePutRequest({ openrouterBaseUrl: "https://gateway.example.com/v1" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSetSetting).toHaveBeenCalledWith(
+      "openrouterBaseUrl",
+      "https://gateway.example.com/v1",
+    );
+  });
+
+  it("rejects an invalid OpenRouter base URL", async () => {
+    const response = await PUT(makePutRequest({ openrouterBaseUrl: "not a url" }));
     const data = await response.json();
 
     expect(response.status).toBe(400);

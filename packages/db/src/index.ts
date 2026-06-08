@@ -6,9 +6,13 @@ export { createFile, deleteFile, listFiles, updateFile } from "./queries/files";
 export type { UpsertModelInput } from "./queries/models";
 export { isModelCacheEmpty, listModels, syncModels } from "./queries/models";
 export {
+  DEFAULT_OPENROUTER_BASE_URL,
   getAllSettings,
+  getCustomProviders,
   getDecryptedApiKey,
+  getOpenrouterBaseUrl,
   getSetting,
+  setCustomProviders,
   setSetting,
 } from "./queries/settings";
 export type {

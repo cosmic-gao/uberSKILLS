@@ -81,9 +81,10 @@ export function ChatPanel({
           <Key className="size-6 text-muted-foreground" />
         </div>
         <div>
-          <h3 className="font-semibold">API Key Required</h3>
+          <h3 className="font-semibold">Model Provider Required</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Configure your OpenRouter API key in Settings to use AI-assisted skill creation.
+            Configure a model provider in Settings — an OpenRouter API key or a custom
+            OpenAI-compatible provider — to use AI-assisted skill creation.
           </p>
         </div>
         <Button asChild variant="default">
@@ -186,8 +187,8 @@ function resolveErrorText(error: Error | undefined): string | null {
   if (!error) return null;
   const msg = error.message;
 
-  if (msg.includes("NO_API_KEY") || msg.includes("401")) {
-    return "API key is missing or invalid. Check your Settings.";
+  if (msg.includes("NO_PROVIDER") || msg.includes("NO_API_KEY") || msg.includes("401")) {
+    return "No model provider is configured, or the key is invalid. Check your Settings.";
   }
   if (msg.includes("RATE_LIMITED") || msg.includes("429")) {
     return "Rate limited by the AI provider. Please wait and try again.";

@@ -1,15 +1,24 @@
 # AI Integration
 
-uberSKILLS uses [OpenRouter](https://openrouter.ai) as its AI provider, accessed through the [Vercel AI SDK](https://sdk.vercel.ai) with the `@openrouter/ai-sdk-provider` bridge.
+uberSKILLS reaches AI models through the [Vercel AI SDK](https://sdk.vercel.ai): the built-in [OpenRouter](https://openrouter.ai) provider via `@openrouter/ai-sdk-provider`, and custom OpenAI-compatible providers via `@ai-sdk/openai-compatible`. OpenRouter is **optional** — you can instead (or additionally) configure any number of custom providers (MiniMax, DeepSeek, Moonshot, a local Ollama, …).
 
 ## Overview
 
 ```
-Client (useChat)  -->  API Route (streamText)  -->  OpenRouter  -->  AI Model
-                  <--  SSE stream              <--             <--
+Client (useChat)  -->  API Route (streamText)  -->  resolveLanguageModel()  -->  Provider  -->  AI Model
+                  <--  SSE stream              <--                          <--           <--
 ```
 
-All AI calls are server-side. The OpenRouter API key is decrypted from the database only in API route handlers and never exposed to the client.
+All AI calls are server-side. Provider API keys are decrypted from the database only in API route handlers and never exposed to the client.
+
+## Provider resolution
+
+A single helper, `resolveLanguageModel(modelId)` in `apps/web/lib/ai-provider.ts`, turns a model id into an AI SDK language model. It is the one place that knows about providers, so the streaming routes (`/api/chat`, `/api/test`, `/api/test/[id]/continue`) never wire providers directly.
+
+- Model ids prefixed with `custom:<providerId>/<modelId>` resolve to a configured custom provider.
+- All other ids fall back to the built-in OpenRouter provider (requires an OpenRouter API key).
+
+Custom providers are wired as `@ai-sdk/openai-compatible` clients and managed through the AI SDK's [`createProviderRegistry`](https://ai-sdk.dev/docs/reference/ai-sdk-core/provider-registry) (keyed by provider id, separator `/`); only models the user explicitly listed are allowed. OpenRouter uses a dedicated `createOpenRouter` client (with an overridable base URL), since its `vendor/model:variant` id scheme is distinct. When nothing matches, `resolveLanguageModel` throws `NoProviderError`, which routes map to HTTP 401.
 
 ## OpenRouter
 
@@ -44,24 +53,43 @@ HTTP-Referer: http://localhost:3000
 X-Title: uberSKILLS
 ```
 
+### Custom Base URL
+
+The OpenRouter base URL defaults to `https://openrouter.ai/api/v1` but can be overridden in Settings (`openrouterBaseUrl`). Point it at an OpenRouter-compatible gateway to extend the available models. The override applies to model sync, the connection test, and chat/test streaming.
+
+## Custom Providers (OpenAI-compatible)
+
+Custom providers are stored as a single **encrypted** `customProviders` blob in the `settings` table (they contain API keys). Each provider has an `id`, `name`, `baseUrl`, `apiKey`, and a manually-entered (or fetched) list of `models`.
+
+- Their models appear in the model picker grouped under the provider name, with ids namespaced as `custom:<providerId>/<modelId>`.
+- `GET /api/settings` returns providers with keys masked (`apiKeySet: boolean`); raw keys never reach the client.
+- `POST /api/settings/providers/fetch-models` proxies the provider's `GET {baseUrl}/models` so users can auto-populate the model list (manual entry is the fallback for endpoints that don't expose `/models`).
+- `GET /api/settings/test?provider=<id>` performs a best-effort connectivity check against `{baseUrl}/models`.
+- Keyless endpoints (e.g. a local Ollama) are supported: an empty key is passed through as a string so the provider never falls back to an environment variable.
+
 ## Vercel AI SDK
 
 ### Server-Side -- `streamText()`
 
-Used in `/api/chat` and `/api/test` route handlers:
+Used in `/api/chat` and `/api/test` route handlers, with provider selection delegated to the resolver:
 
 ```typescript
 import { streamText } from "ai";
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
+import { resolveLanguageModel, isNoProviderError } from "@/lib/ai-provider";
 
 export async function POST(req: Request) {
   const { messages, model } = await req.json();
-  const apiKey = await getDecryptedApiKey();
 
-  const openrouter = createOpenRouter({ apiKey });
+  let resolved;
+  try {
+    resolved = resolveLanguageModel(model);
+  } catch (err) {
+    if (isNoProviderError(err)) return noProviderResponse(); // 401
+    throw err;
+  }
 
   const result = streamText({
-    model: openrouter(model),
+    model: resolved.model,
     system: systemPrompt,
     messages,
   });

@@ -12,6 +12,7 @@ export default mergeConfig(rootConfig, {
     include: [
       "app/**/*.test.ts",
       "hooks/**/*.test.ts",
+      "lib/**/*.test.ts",
       "components/**/*.test.ts",
       "components/**/*.test.tsx",
     ],

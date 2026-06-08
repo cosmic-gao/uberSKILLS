@@ -49,7 +49,8 @@ export function WelcomeModal() {
         <DialogHeader>
           <DialogTitle>Welcome to uberSKILLS</DialogTitle>
           <DialogDescription>
-            To get started, you need to configure your OpenRouter API key in Settings.
+            To get started, configure a model provider in Settings — an OpenRouter API key, or a
+            custom OpenAI-compatible provider like MiniMax.
           </DialogDescription>
         </DialogHeader>
 

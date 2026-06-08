@@ -2,10 +2,10 @@
 
 ## API Key Storage
 
-- The OpenRouter API key is **encrypted at rest** using AES-256-GCM in the `settings` table.
+- All provider API keys are **encrypted at rest** using AES-256-GCM in the `settings` table. This covers the OpenRouter key (`openrouterApiKey`) and every custom provider key, which are stored together in an encrypted `customProviders` JSON blob.
 - The encryption key is derived from `ENCRYPTION_SECRET` env var, or auto-generated on first run and stored at `data/.secret`.
-- The API key is **never logged**, **never included in error messages**, and **never sent to the client**.
-- Decryption happens only server-side in API route handlers.
+- Keys are **never logged**, **never included in error messages**, and **never sent to the client** — `GET /api/settings` masks the OpenRouter key and replaces custom provider keys with an `apiKeySet` boolean.
+- Decryption happens only server-side in API route handlers and the provider resolver.
 
 ## Input Validation
 

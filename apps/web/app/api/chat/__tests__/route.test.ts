@@ -1,11 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@uberskills/db", () => ({
-  getDecryptedApiKey: vi.fn(),
-}));
-
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: vi.fn(),
+vi.mock("@/lib/ai-provider", () => ({
+  resolveLanguageModel: vi.fn(),
+  isNoProviderError: vi.fn(),
 }));
 
 vi.mock("ai", () => ({
@@ -13,11 +10,9 @@ vi.mock("ai", () => ({
   convertToModelMessages: vi.fn().mockImplementation((msgs: unknown) => Promise.resolve(msgs)),
 }));
 
-const { getDecryptedApiKey } = await import("@uberskills/db");
-const mockedGetDecryptedApiKey = vi.mocked(getDecryptedApiKey);
-
-const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
-const mockedCreateOpenRouter = vi.mocked(createOpenRouter);
+const { resolveLanguageModel, isNoProviderError } = await import("@/lib/ai-provider");
+const mockedResolve = vi.mocked(resolveLanguageModel);
+const mockedIsNoProvider = vi.mocked(isNoProviderError);
 
 const { streamText } = await import("ai");
 const mockedStreamText = vi.mocked(streamText);
@@ -33,13 +28,25 @@ function makeRequest(body: unknown): Request {
   });
 }
 
+/** Stubs resolveLanguageModel to return a fake model. */
+function stubResolved() {
+  mockedResolve.mockReturnValue({ model: { id: "fake-model" } } as unknown as ReturnType<
+    typeof resolveLanguageModel
+  >);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedIsNoProvider.mockReturnValue(false);
 });
 
 describe("POST /api/chat", () => {
-  it("returns 401 when no API key is configured", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue(null);
+  it("returns 401 when no provider is configured", async () => {
+    const err = Object.assign(new Error("no provider"), { code: "NO_PROVIDER" });
+    mockedResolve.mockImplementation(() => {
+      throw err;
+    });
+    mockedIsNoProvider.mockReturnValue(true);
 
     const response = await POST(
       makeRequest({
@@ -50,13 +57,14 @@ describe("POST /api/chat", () => {
     const data = await response.json();
 
     expect(response.status).toBe(401);
-    expect(data.code).toBe("NO_API_KEY");
+    expect(data.code).toBe("NO_PROVIDER");
   });
 
-  it("returns 500 when API key decryption fails", async () => {
-    mockedGetDecryptedApiKey.mockImplementation(() => {
+  it("returns 500 when provider resolution throws (e.g. decryption fails)", async () => {
+    mockedResolve.mockImplementation(() => {
       throw new Error("decryption failed");
     });
+    mockedIsNoProvider.mockReturnValue(false);
 
     const response = await POST(
       makeRequest({
@@ -71,8 +79,6 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 400 when body is not valid JSON", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const request = new Request("http://localhost:3000/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -87,8 +93,6 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 400 when messages is missing or empty", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ messages: [], model: "anthropic/claude-sonnet-4" }));
     const data = await response.json();
 
@@ -97,8 +101,6 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 400 when messages is not an array", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(
       makeRequest({ messages: "not-array", model: "anthropic/claude-sonnet-4" }),
     );
@@ -109,8 +111,6 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 400 when model is missing", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ messages: [{ role: "user", content: "hi" }] }));
     const data = await response.json();
 
@@ -119,8 +119,6 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 400 when model is empty string", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(
       makeRequest({ messages: [{ role: "user", content: "hi" }], model: "  " }),
     );
@@ -130,16 +128,9 @@ describe("POST /api/chat", () => {
     expect(data.code).toBe("INVALID_MODEL");
   });
 
-  it("creates OpenRouter provider with correct headers and streams response", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
+  it("resolves the model and streams the response", async () => {
+    stubResolved();
 
-    // Mock the provider factory to return a model selector function
-    const mockModelFn = vi.fn().mockReturnValue({ modelId: "anthropic/claude-sonnet-4" });
-    mockedCreateOpenRouter.mockReturnValue(
-      mockModelFn as unknown as ReturnType<typeof createOpenRouter>,
-    );
-
-    // Mock streamText to return an object with toUIMessageStreamResponse
     const mockResponse = new Response("streamed data", { status: 200 });
     mockedStreamText.mockReturnValue({
       toUIMessageStreamResponse: () => mockResponse,
@@ -148,19 +139,9 @@ describe("POST /api/chat", () => {
     const messages = [{ role: "user" as const, content: "Create a React component skill" }];
     const response = await POST(makeRequest({ messages, model: "anthropic/claude-sonnet-4" }));
 
-    // Verify OpenRouter provider was created with the API key and headers
-    expect(mockedCreateOpenRouter).toHaveBeenCalledWith({
-      apiKey: "sk-or-v1-test",
-      headers: {
-        "HTTP-Referer": "https://uberskills.dev",
-        "X-Title": "uberSKILLS",
-      },
-    });
+    // The route delegates provider selection to the resolver.
+    expect(mockedResolve).toHaveBeenCalledWith("anthropic/claude-sonnet-4");
 
-    // Verify the model selector was called with the correct model id
-    expect(mockModelFn).toHaveBeenCalledWith("anthropic/claude-sonnet-4");
-
-    // Verify streamText was called with system prompt and messages
     expect(mockedStreamText).toHaveBeenCalledWith(
       expect.objectContaining({
         system: expect.stringContaining("JSON code block"),
@@ -174,12 +155,7 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 502 when streamText throws a generic error", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
-    const mockModelFn = vi.fn().mockReturnValue({ modelId: "test/model" });
-    mockedCreateOpenRouter.mockReturnValue(
-      mockModelFn as unknown as ReturnType<typeof createOpenRouter>,
-    );
+    stubResolved();
     mockedStreamText.mockImplementation(() => {
       throw new Error("Connection refused");
     });
@@ -194,12 +170,7 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 401 when streamText throws an auth error", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-bad");
-
-    const mockModelFn = vi.fn().mockReturnValue({ modelId: "test/model" });
-    mockedCreateOpenRouter.mockReturnValue(
-      mockModelFn as unknown as ReturnType<typeof createOpenRouter>,
-    );
+    stubResolved();
     mockedStreamText.mockImplementation(() => {
       throw new Error("401 Unauthorized");
     });
@@ -214,12 +185,7 @@ describe("POST /api/chat", () => {
   });
 
   it("returns 429 when streamText throws a rate limit error", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-key");
-
-    const mockModelFn = vi.fn().mockReturnValue({ modelId: "test/model" });
-    mockedCreateOpenRouter.mockReturnValue(
-      mockModelFn as unknown as ReturnType<typeof createOpenRouter>,
-    );
+    stubResolved();
     mockedStreamText.mockImplementation(() => {
       throw new Error("429 rate limit exceeded");
     });

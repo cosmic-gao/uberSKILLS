@@ -1,4 +1,9 @@
-import { getDecryptedApiKey, syncModels, type UpsertModelInput } from "@uberskills/db";
+import {
+  getDecryptedApiKey,
+  getOpenrouterBaseUrl,
+  syncModels,
+  type UpsertModelInput,
+} from "@uberskills/db";
 
 /** Raw model shape from the OpenRouter /api/v1/models response. */
 interface OpenRouterRawModel {
@@ -57,7 +62,8 @@ export async function fetchAndSyncModels(): Promise<number> {
     throw new SyncError("No API key configured. Add one in Settings first.", "NO_API_KEY", 401);
   }
 
-  const res = await fetch("https://openrouter.ai/api/v1/models", {
+  const baseUrl = getOpenrouterBaseUrl().replace(/\/+$/, "");
+  const res = await fetch(`${baseUrl}/models`, {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "HTTP-Referer": "https://uberskills.dev",

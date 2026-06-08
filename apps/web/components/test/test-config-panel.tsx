@@ -140,9 +140,10 @@ export function TestConfigPanel({
           <Key className="size-6 text-muted-foreground" />
         </div>
         <div>
-          <h3 className="font-semibold">API Key Required</h3>
+          <h3 className="font-semibold">Model Provider Required</h3>
           <p className="mt-1 text-sm text-muted-foreground">
-            Configure your OpenRouter API key in Settings to run skill tests.
+            Configure a model provider in Settings — an OpenRouter API key or a custom
+            OpenAI-compatible provider — to run skill tests.
           </p>
         </div>
         <Button asChild variant="default">

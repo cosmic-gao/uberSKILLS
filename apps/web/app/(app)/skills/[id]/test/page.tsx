@@ -1,4 +1,10 @@
-import { getAllSettings, getDecryptedApiKey, getSkillBySlug, listFiles } from "@uberskills/db";
+import {
+  getAllSettings,
+  getCustomProviders,
+  getDecryptedApiKey,
+  getSkillBySlug,
+  listFiles,
+} from "@uberskills/db";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
@@ -32,14 +38,14 @@ export default async function SkillTestPage({ params }: TestPageProps) {
   const settingsMap = new Map(settingsRows.map((r) => [r.key, r.value]));
   const defaultModel = settingsMap.get("defaultModel") ?? DEFAULT_MODEL;
 
-  // Check whether an API key is configured without exposing the key itself.
+  // Check whether any provider is configured without exposing secrets.
   // Decryption can throw if the secret is missing or corrupted, so we catch
-  // and default to false rather than crashing the page.
-  let hasApiKey = false;
+  // and fall back to the custom-provider check rather than crashing the page.
+  let hasApiKey = getCustomProviders().length > 0;
   try {
-    hasApiKey = getDecryptedApiKey() !== null;
+    hasApiKey = getDecryptedApiKey() !== null || hasApiKey;
   } catch {
-    hasApiKey = false;
+    // Keep the custom-provider result.
   }
 
   // Count bundled files so the UI can inform users about file inclusion.

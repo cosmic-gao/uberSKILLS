@@ -1,17 +1,27 @@
-import { getDecryptedApiKey } from "@uberskills/db";
+import { getCustomProviders, getDecryptedApiKey, getOpenrouterBaseUrl } from "@uberskills/db";
 import { NextResponse } from "next/server";
 
 import { routeLogger } from "@/lib/logger";
 
 const log = routeLogger("GET", "/api/settings/test");
 
+const PROVIDER_HEADERS: Record<string, string> = {
+  "HTTP-Referer": "https://uberskills.dev",
+  "X-Title": "uberSKILLS",
+};
+
 /**
- * GET /api/settings/test -- Tests the OpenRouter API key by calling their models endpoint.
+ * GET /api/settings/test -- Tests connectivity to a configured provider.
  *
- * Decrypts the stored API key, sends a request to OpenRouter /api/v1/models,
- * and returns success or an appropriate error.
+ * With `?provider=<id>` it tests a custom OpenAI-compatible provider by calling
+ * its `/models` endpoint. Otherwise it tests the stored OpenRouter API key.
  */
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: Request): Promise<NextResponse> {
+  const providerId = new URL(request.url).searchParams.get("provider");
+  if (providerId) {
+    return testCustomProvider(providerId);
+  }
+
   try {
     const apiKey = getDecryptedApiKey();
     if (!apiKey) {
@@ -22,7 +32,8 @@ export async function GET(): Promise<NextResponse> {
       );
     }
 
-    const res = await fetch("https://openrouter.ai/api/v1/models", {
+    const baseUrl = getOpenrouterBaseUrl().replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/models`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "HTTP-Referer": "https://uberskills.dev",
@@ -60,6 +71,64 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json(
       {
         error: "Could not reach OpenRouter. Check your network connection.",
+        code: "NETWORK_ERROR",
+      },
+      { status: 502 },
+    );
+  }
+}
+
+/**
+ * Tests a custom OpenAI-compatible provider by GETting its `/models` endpoint.
+ *
+ * Some providers don't expose `/models`, so this is best-effort: 2xx means
+ * connected, 401/403 means a bad key, and other statuses are reported as
+ * upstream errors with a hint.
+ */
+async function testCustomProvider(providerId: string): Promise<NextResponse> {
+  const provider = getCustomProviders().find((p) => p.id === providerId);
+  if (!provider) {
+    log.warn({ providerId }, "custom provider not found");
+    return NextResponse.json(
+      { error: "Custom provider not found.", code: "NOT_FOUND" },
+      { status: 404 },
+    );
+  }
+
+  const url = `${provider.baseUrl.replace(/\/+$/, "")}/models`;
+  const headers: Record<string, string> = { ...PROVIDER_HEADERS };
+  if (provider.apiKey) {
+    headers.Authorization = `Bearer ${provider.apiKey}`;
+  }
+
+  try {
+    const res = await fetch(url, { headers });
+
+    if (res.status === 401 || res.status === 403) {
+      log.warn({ providerId, upstreamStatus: res.status }, "invalid custom provider key");
+      return NextResponse.json(
+        { error: "Invalid API key for this provider.", code: "INVALID_KEY" },
+        { status: 401 },
+      );
+    }
+    if (!res.ok) {
+      log.warn({ providerId, upstreamStatus: res.status }, "custom provider returned error");
+      return NextResponse.json(
+        {
+          error: `Provider returned status ${res.status}. The endpoint may not expose /models.`,
+          code: "UPSTREAM_ERROR",
+        },
+        { status: 502 },
+      );
+    }
+
+    log.info({ providerId }, "custom provider test passed");
+    return NextResponse.json({ status: "connected" });
+  } catch (err) {
+    log.error({ err, providerId }, "failed to reach custom provider");
+    return NextResponse.json(
+      {
+        error: "Could not reach the provider. Check the base URL and your network connection.",
         code: "NETWORK_ERROR",
       },
       { status: 502 },

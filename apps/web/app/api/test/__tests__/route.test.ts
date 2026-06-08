@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 vi.mock("@uberskills/db", () => ({
-  getDecryptedApiKey: vi.fn(),
   getSkillById: vi.fn(),
   listFiles: vi.fn(),
   createTestRun: vi.fn(),
@@ -13,18 +12,16 @@ vi.mock("@uberskills/skill-engine", () => ({
   buildTestSystemPrompt: vi.fn(),
 }));
 
-vi.mock("@openrouter/ai-sdk-provider", () => ({
-  createOpenRouter: vi.fn(),
+vi.mock("@/lib/ai-provider", () => ({
+  resolveLanguageModel: vi.fn(),
+  isNoProviderError: vi.fn(),
 }));
 
 vi.mock("ai", () => ({
   streamText: vi.fn(),
 }));
 
-const { getDecryptedApiKey, getSkillById, listFiles, createTestRun, updateTestRun } = await import(
-  "@uberskills/db"
-);
-const mockedGetDecryptedApiKey = vi.mocked(getDecryptedApiKey);
+const { getSkillById, listFiles, createTestRun, updateTestRun } = await import("@uberskills/db");
 const mockedGetSkillById = vi.mocked(getSkillById);
 const mockedListFiles = vi.mocked(listFiles);
 const mockedCreateTestRun = vi.mocked(createTestRun);
@@ -34,8 +31,9 @@ const { substitute, buildTestSystemPrompt } = await import("@uberskills/skill-en
 const mockedSubstitute = vi.mocked(substitute);
 const mockedBuildTestSystemPrompt = vi.mocked(buildTestSystemPrompt);
 
-const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
-const mockedCreateOpenRouter = vi.mocked(createOpenRouter);
+const { resolveLanguageModel, isNoProviderError } = await import("@/lib/ai-provider");
+const mockedResolve = vi.mocked(resolveLanguageModel);
+const mockedIsNoProvider = vi.mocked(isNoProviderError);
 
 const { streamText } = await import("ai");
 const mockedStreamText = vi.mocked(streamText);
@@ -95,7 +93,6 @@ const fakeTestRun = {
 
 /** Sets up the common mocks for a valid "happy path" test. */
 function setupHappyPath() {
-  mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
   mockedGetSkillById.mockReturnValue(fakeSkill);
   mockedSubstitute.mockReturnValue("You are a developer. Help with coding.");
   mockedListFiles.mockReturnValue([]);
@@ -105,17 +102,14 @@ function setupHappyPath() {
     summarizedCount: 0,
   });
   mockedCreateTestRun.mockReturnValue(fakeTestRun);
-
-  const mockModelFn = vi.fn().mockReturnValue({ modelId: "anthropic/claude-sonnet-4" });
-  mockedCreateOpenRouter.mockReturnValue(
-    mockModelFn as unknown as ReturnType<typeof createOpenRouter>,
-  );
-
-  return mockModelFn;
+  mockedResolve.mockReturnValue({ model: { id: "fake-model" } } as unknown as ReturnType<
+    typeof resolveLanguageModel
+  >);
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedIsNoProvider.mockReturnValue(false);
 });
 
 describe("POST /api/test", () => {
@@ -123,26 +117,36 @@ describe("POST /api/test", () => {
   // API key validation
   // ---------------------------------------------------------------------------
 
-  it("returns 401 when no API key is configured", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue(null);
+  it("returns 401 when no provider is configured", async () => {
+    setupHappyPath();
+    const err = Object.assign(new Error("no provider"), { code: "NO_PROVIDER" });
+    mockedResolve.mockImplementation(() => {
+      throw err;
+    });
+    mockedIsNoProvider.mockReturnValue(true);
 
     const response = await POST(makeRequest(validBody));
     const data = await response.json();
 
     expect(response.status).toBe(401);
-    expect(data.code).toBe("NO_API_KEY");
+    expect(data.code).toBe("NO_PROVIDER");
+    // The run row must not be created when no provider resolves.
+    expect(mockedCreateTestRun).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when API key decryption fails", async () => {
-    mockedGetDecryptedApiKey.mockImplementation(() => {
+  it("returns 500 when provider resolution throws (e.g. decryption fails)", async () => {
+    setupHappyPath();
+    mockedResolve.mockImplementation(() => {
       throw new Error("decryption failed");
     });
+    mockedIsNoProvider.mockReturnValue(false);
 
     const response = await POST(makeRequest(validBody));
     const data = await response.json();
 
     expect(response.status).toBe(500);
     expect(data.code).toBe("DECRYPT_ERROR");
+    expect(mockedCreateTestRun).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------
@@ -150,8 +154,6 @@ describe("POST /api/test", () => {
   // ---------------------------------------------------------------------------
 
   it("returns 400 when body is not valid JSON", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const request = new Request("http://localhost:3000/api/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -166,8 +168,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when skillId is missing", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ model: "m", userMessage: "hi" }));
     const data = await response.json();
 
@@ -176,8 +176,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when skillId is empty", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ skillId: "  ", model: "m", userMessage: "hi" }));
     const data = await response.json();
 
@@ -186,8 +184,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when model is missing", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ skillId: "s1", userMessage: "hi" }));
     const data = await response.json();
 
@@ -196,8 +192,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when model is empty", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ skillId: "s1", model: " ", userMessage: "hi" }));
     const data = await response.json();
 
@@ -206,8 +200,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when userMessage is missing", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ skillId: "s1", model: "m" }));
     const data = await response.json();
 
@@ -216,8 +208,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when userMessage is empty", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ skillId: "s1", model: "m", userMessage: "   " }));
     const data = await response.json();
 
@@ -226,8 +216,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when arguments is not a plain object", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ ...validBody, arguments: "not-object" }));
     const data = await response.json();
 
@@ -236,8 +224,6 @@ describe("POST /api/test", () => {
   });
 
   it("returns 400 when arguments is an array", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
-
     const response = await POST(makeRequest({ ...validBody, arguments: ["a"] }));
     const data = await response.json();
 
@@ -250,7 +236,6 @@ describe("POST /api/test", () => {
   // ---------------------------------------------------------------------------
 
   it("returns 404 when skill is not found", async () => {
-    mockedGetDecryptedApiKey.mockReturnValue("sk-or-v1-test");
     mockedGetSkillById.mockReturnValue(null);
 
     const response = await POST(makeRequest(validBody));
@@ -265,7 +250,7 @@ describe("POST /api/test", () => {
   // ---------------------------------------------------------------------------
 
   it("resolves placeholders, creates test run, and returns streaming response", async () => {
-    const mockModelFn = setupHappyPath();
+    setupHappyPath();
 
     const mockResponse = new Response("streamed data", { status: 200 });
     mockedStreamText.mockReturnValue({
@@ -291,13 +276,9 @@ describe("POST /api/test", () => {
       arguments: JSON.stringify({ ROLE: "developer", TASK: "coding" }),
     });
 
-    // Verify OpenRouter provider was configured correctly
-    expect(mockedCreateOpenRouter).toHaveBeenCalledWith({
-      apiKey: "sk-or-v1-test",
-      headers: {
-        "HTTP-Referer": "https://uberskills.dev",
-        "X-Title": "uberSKILLS",
-      },
+    // Verify the model was resolved through the provider resolver
+    expect(mockedResolve).toHaveBeenCalledWith("anthropic/claude-sonnet-4", {
+      enableWebSearch: undefined,
     });
 
     // Verify streamText was called with resolved content as system prompt
@@ -307,8 +288,6 @@ describe("POST /api/test", () => {
         messages: [{ role: "user", content: "Hello, test this skill" }],
       }),
     );
-
-    expect(mockModelFn).toHaveBeenCalledWith("anthropic/claude-sonnet-4", undefined);
 
     // Verify test run ID is exposed via header
     expect(response.headers.get("X-Test-Run-Id")).toBe("tr-abc");

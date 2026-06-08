@@ -37,7 +37,7 @@ export default function NewSkillPage() {
           return;
         }
         const settings = (await res.json()) as AppSettings;
-        setHasApiKey(settings.openrouterApiKey !== null);
+        setHasApiKey(settings.openrouterApiKey !== null || settings.customProviders.length > 0);
 
         // Use the configured default model if no model has been selected yet
         if (settings.defaultModel) {

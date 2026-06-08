@@ -23,7 +23,16 @@ vi.mock("../../client", () => ({
 // Stub the env before importing modules that use it
 vi.stubEnv("ENCRYPTION_SECRET", TEST_ENCRYPTION_KEY);
 
-const { getSetting, setSetting, getAllSettings, getDecryptedApiKey } = await import("../settings");
+const {
+  getSetting,
+  setSetting,
+  getAllSettings,
+  getDecryptedApiKey,
+  getCustomProviders,
+  setCustomProviders,
+  getOpenrouterBaseUrl,
+  DEFAULT_OPENROUTER_BASE_URL,
+} = await import("../settings");
 const { settings } = await import("../../schema");
 
 describe("settings query functions", () => {
@@ -139,6 +148,65 @@ describe("settings query functions", () => {
 
       const result = getDecryptedApiKey();
       expect(result).toBe("plain-key");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getCustomProviders / setCustomProviders
+  // -------------------------------------------------------------------------
+  describe("custom providers", () => {
+    const provider = {
+      id: "minimax",
+      name: "MiniMax",
+      baseUrl: "https://api.minimaxi.com/v1",
+      apiKey: "mm-secret-key",
+      models: [{ id: "MiniMax-Text-01", name: "MiniMax Text 01" }],
+    };
+
+    it("returns an empty array when no providers are configured", () => {
+      expect(getCustomProviders()).toEqual([]);
+    });
+
+    it("round-trips providers through an encrypted blob", () => {
+      setCustomProviders([provider]);
+
+      // The stored row must be encrypted and must not contain the plaintext key.
+      const row = getSetting("customProviders");
+      expect(row?.encrypted).toBe(true);
+      expect(row?.value).not.toContain("mm-secret-key");
+      expect(row?.value.split(":").length).toBe(3);
+
+      expect(getCustomProviders()).toEqual([provider]);
+    });
+
+    it("returns an empty array for a malformed (non-JSON) blob", () => {
+      setSetting("customProviders", "not-json", false);
+      expect(getCustomProviders()).toEqual([]);
+    });
+
+    it("overwrites the previous provider list", () => {
+      setCustomProviders([provider]);
+      setCustomProviders([]);
+      expect(getCustomProviders()).toEqual([]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // getOpenrouterBaseUrl
+  // -------------------------------------------------------------------------
+  describe("getOpenrouterBaseUrl", () => {
+    it("returns the default when unset", () => {
+      expect(getOpenrouterBaseUrl()).toBe(DEFAULT_OPENROUTER_BASE_URL);
+    });
+
+    it("returns a configured value", () => {
+      setSetting("openrouterBaseUrl", "https://gateway.example.com/v1");
+      expect(getOpenrouterBaseUrl()).toBe("https://gateway.example.com/v1");
+    });
+
+    it("falls back to the default for a blank value", () => {
+      setSetting("openrouterBaseUrl", "   ");
+      expect(getOpenrouterBaseUrl()).toBe(DEFAULT_OPENROUTER_BASE_URL);
     });
   });
 });

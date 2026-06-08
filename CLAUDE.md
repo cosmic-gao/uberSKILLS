@@ -239,12 +239,24 @@ The uberSKILLS brand uses a minimal, monochromatic palette derived from the logo
 
 ## AI Integration
 
-### OpenRouter
+### Provider resolution
 
-- All AI calls go through OpenRouter via `@openrouter/ai-sdk-provider`.
-- API key stored encrypted (AES-256-GCM) in the `settings` table.
-- Server-side proxy routes decrypt the key -- never expose it to the client.
+- `apps/web/lib/ai-provider.ts` exposes `resolveLanguageModel(modelId)`, the single place that maps a model id to a provider. The streaming routes (`/api/chat`, `/api/test`, `/api/test/[id]/continue`) call it instead of constructing providers directly.
+- Custom providers are wired with `@ai-sdk/openai-compatible` and managed through the AI SDK's `createProviderRegistry` (keyed by provider id, separator `/`). The built-in OpenRouter provider uses `@openrouter/ai-sdk-provider` (`createOpenRouter`, with an overridable `baseURL`).
+- `custom:<providerId>/<modelId>` ids resolve to a configured custom provider (only models the user listed are allowed); all other ids fall back to OpenRouter. A missing provider throws `NoProviderError` (mapped to HTTP 401).
+
+### OpenRouter (built-in, optional)
+
+- API key stored encrypted (AES-256-GCM) in the `settings` table; optional — the app works with only custom providers configured.
+- Base URL is overridable via the `openrouterBaseUrl` setting (default `https://openrouter.ai/api/v1`).
+- Server-side routes decrypt the key -- never expose it to the client.
 - Set headers: `HTTP-Referer` and `X-Title: uberSKILLS` on all requests.
+
+### Custom providers (OpenAI-compatible)
+
+- Any number of providers (MiniMax, DeepSeek, Moonshot, local Ollama, …) configured in Settings with name, base URL, API key, and a model list.
+- Stored as a single **encrypted** `customProviders` JSON blob in `settings` (it holds API keys). `GET /api/settings` masks keys as `apiKeySet`.
+- Their models merge into `/api/models` and the model picker, grouped under the provider name.
 
 ### Vercel AI SDK
 

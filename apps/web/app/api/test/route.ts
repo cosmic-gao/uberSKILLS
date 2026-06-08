@@ -1,15 +1,9 @@
-import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import {
-  createTestRun,
-  getDecryptedApiKey,
-  getSkillById,
-  listFiles,
-  updateTestRun,
-} from "@uberskills/db";
+import { createTestRun, getSkillById, listFiles, updateTestRun } from "@uberskills/db";
 import { buildTestSystemPrompt, substitute } from "@uberskills/skill-engine";
 import { streamText } from "ai";
 import { NextResponse } from "next/server";
 
+import { isNoProviderError, resolveLanguageModel } from "@/lib/ai-provider";
 import { routeLogger } from "@/lib/logger";
 
 const log = routeLogger("POST", "/api/test");
@@ -35,24 +29,6 @@ interface TestRequestBody {
  * 6. On error: update test run with error details
  */
 export async function POST(request: Request): Promise<Response> {
-  // Decrypt the stored API key
-  let apiKey: string | null;
-  try {
-    apiKey = getDecryptedApiKey();
-  } catch {
-    return NextResponse.json(
-      { error: "Failed to decrypt API key. Check your encryption secret.", code: "DECRYPT_ERROR" },
-      { status: 500 },
-    );
-  }
-
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "No API key configured. Add one in Settings first.", code: "NO_API_KEY" },
-      { status: 401 },
-    );
-  }
-
   // Parse and validate request body
   let body: TestRequestBody;
   try {
@@ -112,6 +88,22 @@ export async function POST(request: Request): Promise<Response> {
     files: skillFiles.map((f) => ({ path: f.path, content: f.content, type: f.type })),
   });
 
+  // Resolve the model to a configured provider before persisting a run, so a
+  // misconfigured model never leaves an orphaned "running" row behind.
+  let resolved: ReturnType<typeof resolveLanguageModel>;
+  try {
+    resolved = resolveLanguageModel(model, { enableWebSearch });
+  } catch (err) {
+    if (isNoProviderError(err)) {
+      return NextResponse.json({ error: err.message, code: "NO_PROVIDER" }, { status: 401 });
+    }
+    log.error({ err }, "failed to resolve provider");
+    return NextResponse.json(
+      { error: "Failed to decrypt API key. Check your encryption secret.", code: "DECRYPT_ERROR" },
+      { status: 500 },
+    );
+  }
+
   log.info(
     { skillId, model, files: skillFiles.length, inlinedCount, summarizedCount },
     "test run started",
@@ -132,20 +124,9 @@ export async function POST(request: Request): Promise<Response> {
   const startMs = Date.now();
   let ttftMs: number | null = null;
 
-  const openrouter = createOpenRouter({
-    apiKey,
-    headers: {
-      "HTTP-Referer": "https://uberskills.dev",
-      "X-Title": "uberSKILLS",
-    },
-  });
-
   try {
     const result = streamText({
-      model: openrouter(
-        model,
-        enableWebSearch ? { web_search_options: { max_results: 5 } } : undefined,
-      ),
+      model: resolved.model,
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
       // Capture time-to-first-token on the first chunk

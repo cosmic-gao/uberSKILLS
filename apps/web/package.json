@@ -12,6 +12,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.48",
     "@ai-sdk/react": "^3.0.114",
     "@libsql/client": "^0.17.0",
     "@openrouter/ai-sdk-provider": "^2.2.3",
